@@ -29,7 +29,7 @@ contract Staking is ERC20 {
     event Unstaked(address indexed staker, uint256 amount);
 
     // Constructor to initialize the ERC20 token
-    constructor() ERC20("Esther Breath Token", "EBT") {}
+    constructor() ERC20("estheroche", "EBT") {}
 
     function stakeETH(bool autoCompound) external payable {
         require(msg.value > 0, "ETH amount must be greater than 0");
