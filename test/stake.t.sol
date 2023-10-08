@@ -5,6 +5,7 @@ import {Test, console2} from "forge-std/Test.sol";
 import {Staking} from "../src/stake.sol";
 
 contract StakeTest is Test {
+DeployedAddresses = 0x18ca7B243b1f315BBeC55e98C516C1Ce30dcBf87;
     Staking staking = Staking(DeployedAddresses.Staking());
 
     // Test the stake function

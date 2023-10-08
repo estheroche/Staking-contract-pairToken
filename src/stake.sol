@@ -1,125 +1,114 @@
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.0;
 
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
-import "./RewardToken.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
 contract Staking is ERC20 {
-    const WETH = 0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2;
+    using SafeERC20 for IERC20;
 
-    uint256 public autoCompoundFee;
-    uint256 public minimumStakingPeriod;
+    string public constant symbol = "EST";
+    uint256 public constant APR = 14;
+    uint256 public constant secondsPerYear = 31536000; // 365 days
 
-    mapping(address => uint256) public stakedAmounts;
-    mapping(address => uint256) public stakingStartTimes;
-    mapping(address => bool) public isAutoCompounding;
+    // Variables for staking
+    uint256 public autoCompoundFeeRate = 1; // 1% auto compounding fee
+    uint256 public autoCompoundAccumulatedFee;
+    uint256 public minimumStakingPeriod = 30 days; // Minimum staking period of 30 days
 
-    constructor() ERC20("EstherOCHE", "EST") {
-        autoCompoundFee = 100; // 1%
-        minimumStakingPeriod = 30 days; // 1 month
-    }
+    // Mapping to track staked balances and timestamps
+    mapping(address => uint256) public stakedBalances;
+    mapping(address => uint256) public stakedTimestamps;
 
-    function stake(uint256 amount) public payable {
-        require(amount > 0, "Amount must be greater than zero");
-        require(stakingStartTimes[msg.sender] == 0, "User is already staking");
+    // Event for staking and unstaking
+    event Staked(
+        address indexed staker,
+        uint256 amount,
+        bool isAutoCompounding
+    );
+    event Unstaked(address indexed staker, uint256 amount);
 
-        // Convert ETH to WETH
-        WETH.deposit{value: amount}();
+    // Constructor to initialize the ERC20 token
+    constructor() ERC20("Esther Breath Token", "EBT") {}
 
-        // Stake WETH
-        stakedAmounts[msg.sender] = amount;
-        stakingStartTimes[msg.sender] = block.timestamp;
+    function stakeETH(bool autoCompound) external payable {
+        require(msg.value > 0, "ETH amount must be greater than 0");
 
-        // Set auto compounding flag if specified
-        if (isAutoCompounding[msg.sender]) {
-            isAutoCompounding[msg.sender] = true;
+        uint256 wethAmount = convertToWETH(msg.value);
+        _mint(msg.sender, wethAmount);
+        stakedBalances[msg.sender] += wethAmount;
+        stakedTimestamps[msg.sender] = block.timestamp;
+
+        // If auto-compound is enabled, deduct the auto-compound fee
+        if (autoCompound) {
+            uint256 autoCompoundFee = (wethAmount * autoCompoundFeeRate) / 100;
+            autoCompoundAccumulatedFee += autoCompoundFee;
+            stakedBalances[msg.sender] -= autoCompoundFee;
         }
+
+        emit Staked(msg.sender, wethAmount, autoCompound);
     }
 
-    function withdraw() public {
-        require(stakingStartTimes[msg.sender] > 0, "User is not staking");
+    function unstake() external {
+        require(stakedBalances[msg.sender] > 0, "No staked balance");
         require(
             block.timestamp >=
-                stakingStartTimes[msg.sender] + minimumStakingPeriod,
-            "Minimum staking period has not passed"
+                stakedTimestamps[msg.sender] + minimumStakingPeriod,
+            "Minimum staking period not met"
         );
 
-        // Calculate reward
-        uint256 reward = calculateReward(msg.sender);
+        uint256 stakedWETH = stakedBalances[msg.sender];
+        uint256 rewardWETH = calculateReward(msg.sender, stakedWETH);
+        uint256 totalWETH = stakedWETH + rewardWETH;
 
-        // Mint reward to user
-        _mint(msg.sender, reward);
+        // Convert reward back to ETH
+        uint256 rewardETH = convertToETH(rewardWETH);
 
-        // Withdraw staked amount
-        uint256 stakedAmount = stakedAmounts[msg.sender];
-        stakedAmounts[msg.sender] = 0;
-        stakingStartTimes[msg.sender] = 0;
+        // Deduct auto-compound fee from the accumulated fee
+        if (autoCompoundAccumulatedFee > 0) {
+            autoCompoundAccumulatedFee -=
+                (rewardWETH * autoCompoundFeeRate) /
+                100;
+        }
 
-        // Convert WETH to ETH
-        WETH.withdraw(stakedAmount);
+        // Transfer the reward in ETH
+        payable(msg.sender).transfer(rewardETH);
 
-        // Transfer ETH to user
-        (bool success, ) = msg.sender.call{value: stakedAmount}("");
-        require(success, "Failed to transfer ETH to user");
+        // Burn the staked and reward tokens
+        _burn(msg.sender, totalWETH);
+
+        emit Unstaked(msg.sender, totalWETH);
     }
 
-    function autoCompound() public {
-        require(isAutoCompounding[msg.sender], "User is not auto compounding");
+    // Function to calculate the reward based on the APR and staking duration
+    function calculateReward(
+        address staker,
+        uint256 stakedAmount
+    ) internal view returns (uint256) {
+        uint256 stakingDuration = block.timestamp - stakedTimestamps[staker];
+        uint256 rewardRate = (APR * stakedAmount) / 1000; // 1:10 ratio
 
-        // Calculate reward
-        uint256 reward = calculateReward(msg.sender);
-
-        // Calculate auto compound fee
-        uint256 autoCompoundFeeAmount = (reward * autoCompoundFee) / 10000;
-
-        // Remove auto compound fee from reward
-        reward -= autoCompoundFeeAmount;
-
-        // Mint reward to user
-        _mint(msg.sender, reward);
-
-        // Stake reward and principal
-        stakedAmounts[msg.sender] += reward;
-
-        // Update staking start time
-        stakingStartTimes[msg.sender] = block.timestamp;
-
-        // Charge auto compound fee
-        _mint(address(this), autoCompoundFeeAmount);
+        // Calculate reward up to seconds
+        return (stakingDuration * rewardRate) / secondsPerYear;
     }
 
-    function calculateReward(address user) public view returns (uint256) {
-        // Calculate APR
-        uint256 APR = 1400; // 14%
-
-        // Calculate monthly reward rate
-        uint256 monthlyRewardRate = APR / 12;
-
-        // Calculate daily reward rate
-        uint256 dailyRewardRate = monthlyRewardRate / 30;
-
-        // Calculate hourly reward rate
-        uint256 hourlyRewardRate = dailyRewardRate / 24;
-
-        // Calculate minute reward rate
-        uint256 minuteRewardRate = hourlyRewardRate / 60;
-
-        // Calculate second reward rate
-        uint256 secondRewardRate = minuteRewardRate / 60;
-
-        // Calculate time since stake started
-        uint256 timeSinceStakeStarted = block.timestamp -
-            stakingStartTimes[user];
-
-        // Calculate reward
-        uint256 reward = stakedAmounts[user] *
-            secondRewardRate *
-            timeSinceStakeStarted;
-
-        return reward;
+    // Function to convert ETH to WETH
+    function convertToWETH(uint256 ethAmount) internal returns (uint256) {
+        // Perform WETH conversion logic
+        // This function will vary based on the actual WETH implementation being used
+        // For example, you can use the WETH contract's deposit function to wrap ETH
+        // This is a simplified example
+        // Assume 1 ETH = 1 WETH
+        return ethAmount;
     }
 
-    function setAutoCompounding(bool isAutoCompounding) public {
-        // Update auto compounding flag
-        this.isAutoCompounding[msg.sender] = _isAutoCompounding;
+    // Function to convert WETH to ETH
+    function convertToETH(uint256 wethAmount) internal returns (uint256) {
+        // Perform WETH conversion logic
+        // This function will vary based on the actual WETH implementation being used
+        // For example, you can use the WETH contract's withdraw function to unwrap WETH
+        // This is a simplified example
+        // Assume 1 WETH = 1 ETH
+        return wethAmount;
     }
 }
